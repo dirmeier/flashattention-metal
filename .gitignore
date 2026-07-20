@@ -1,0 +1,8 @@
+.idea
+.idea/*
+build
+build/*
+subprojects/*
+!subprojects/*.wrap
+!subprojects/packagefiles/
+__pycache__/

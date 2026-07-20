@@ -1,0 +1,30 @@
+default_language_version:
+  python: python3.12
+
+repos:
+  -   repo: https://github.com/pre-commit/pre-commit-hooks
+      rev: v6.0.0
+      hooks:
+        - id: check-docstring-first
+        - id: check-added-large-files
+          args: ['--maxkb=1000']
+        - id: check-merge-conflict
+        - id: check-toml
+        - id: check-yaml
+        - id: debug-statements
+        - id: end-of-file-fixer
+        - id: trailing-whitespace
+  -   repo: https://github.com/shellcheck-py/shellcheck-py
+      rev: v0.11.0.1
+      hooks:
+        - id: shellcheck
+  - repo: https://github.com/cpp-linter/cpp-linter-hooks
+    rev: v1.6.0
+    hooks:
+      - id: clang-format
+        args: ['--style=file', '--version=21']
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
+      - id: gitlint-ci

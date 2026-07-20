@@ -1,0 +1,9 @@
+[wrap-file]
+directory = metal-cpp-release-metal-cpp_macOS26.4_iOS26.4
+source_url = https://github.com/apple/metal-cpp/archive/refs/tags/release/metal-cpp_macOS26.4_iOS26.4.tar.gz
+source_filename = metal-cpp-macOS26.4.tar.gz
+source_hash = 65a1a2ec3490eac7c5fa16039e1f92471ed24c1912109b0c9591850e74d0c790
+patch_directory = metal-cpp
+
+[provide]
+metal_cpp = metal_cpp_dep
