@@ -1,0 +1,4 @@
+option('metal',
+    type : 'feature',
+    value : 'auto',
+    description : 'Build the Metal backend (requires full Xcode)')
