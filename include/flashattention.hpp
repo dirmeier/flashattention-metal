@@ -2,10 +2,12 @@
 
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
+#include <array>
 #include <cstddef>
 #include <string_view>
 
 #include "attention_naive.hpp"
+#include "kernel_launch.hpp"
 #include "matrix.hpp"
 #include "metal_device.hpp"
 
@@ -18,10 +20,12 @@ class FlashAttention {
   void run(const Matrix& q, const Matrix& k, const Matrix& v,
            const AttentionShape& shape, Matrix& out);
 
-  static std::size_t threadgroup_memory_bytes();
+  static std::size_t threadgroup_memory_bytes(std::size_t head_dim);
 
  private:
-  MTL::ComputePipelineState* pipeline();
+  static constexpr std::size_t kPipelines = std::size(launch::kHeadDims);
+
+  MTL::ComputePipelineState* pipeline(int head_dim);
 
   struct Buffers {
     NS::SharedPtr<MTL::Buffer> q;
@@ -33,6 +37,6 @@ class FlashAttention {
 
   const MetalDevice& device_;
   NS::SharedPtr<MTL::Library> library_;
-  NS::SharedPtr<MTL::ComputePipelineState> pipeline_;
+  std::array<NS::SharedPtr<MTL::ComputePipelineState>, kPipelines> pipelines_;
   Buffers buffers_;
 };

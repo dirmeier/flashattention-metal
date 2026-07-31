@@ -11,15 +11,6 @@
 
 namespace {
 
-/// query rows one threadgroup computes, and the key rows it folds in per
-/// iteration of the inner loop
-constexpr int kQueryRows = 32;
-constexpr int kKeyRows = 32;
-/// one simdgroup, one thread per query row
-constexpr int kThreads = 32;
-
-constexpr const char* kKernelName = "flash_attention";
-
 struct FlashAttentionDims {
   uint32_t batch;
   uint32_t heads;
@@ -29,10 +20,18 @@ struct FlashAttentionDims {
   float scale;
 };
 
+std::string kernel_name(int head_dim) {
+  return std::format("flash_attention_1_d{}", head_dim);
+}
+
+constexpr std::size_t pipeline_slot(int head_dim) noexcept {
+  return head_dim == launch::kHeadDims[0] ? 0 : 1;
+}
+
 }  // namespace
 
-std::size_t FlashAttention::threadgroup_memory_bytes() {
-  return static_cast<std::size_t>(kQueryRows) * kKeyRows * sizeof(float);
+std::size_t FlashAttention::threadgroup_memory_bytes(std::size_t head_dim) {
+  return launch::threadgroup_memory_bytes(static_cast<int>(head_dim));
 }
 
 FlashAttention::FlashAttention(const MetalDevice& device,
@@ -45,27 +44,29 @@ FlashAttention::FlashAttention(const MetalDevice& device,
   }
 }
 
-MTL::ComputePipelineState* FlashAttention::pipeline() {
-  if (pipeline_) {
-    return pipeline_.get();
+MTL::ComputePipelineState* FlashAttention::pipeline(int head_dim) {
+  auto& cached = pipelines_[pipeline_slot(head_dim)];
+  if (cached) {
+    return cached.get();
   }
 
-  auto* name = NS::String::string(kKernelName, NS::UTF8StringEncoding);
+  const std::string kernel = kernel_name(head_dim);
+  auto* name = NS::String::string(kernel.c_str(), NS::UTF8StringEncoding);
   const auto function = NS::TransferPtr(library_->newFunction(name));
   if (!function) {
-    throw std::runtime_error(std::format("kernel {} not found", kKernelName));
+    throw std::runtime_error(std::format("kernel {} not found", kernel));
   }
 
   NS::Error* error = nullptr;
-  pipeline_ = NS::TransferPtr(
+  cached = NS::TransferPtr(
       device_.device()->newComputePipelineState(function.get(), &error));
-  if (!pipeline_) {
+  if (!cached) {
     throw std::runtime_error(std::format(
-        "failed to build pipeline for {}: {}", kKernelName,
+        "failed to build pipeline for {}: {}", kernel,
         error != nullptr ? error->localizedDescription()->utf8String()
                          : "no reason reported"));
   }
-  return pipeline_.get();
+  return cached.get();
 }
 
 void FlashAttention::run(const Matrix& q, const Matrix& k, const Matrix& v,
@@ -73,6 +74,13 @@ void FlashAttention::run(const Matrix& q, const Matrix& k, const Matrix& v,
   if (shape.head_dim != 64 && shape.head_dim != 128) {
     throw std::runtime_error(std::format(
         "head dimension must be 64 or 128, got {}", shape.head_dim));
+  }
+
+  const int head_dim = static_cast<int>(shape.head_dim);
+  const auto tile = static_cast<std::size_t>(launch::num_query_rows(head_dim));
+  if (shape.seq_len % tile != 0) {
+    throw std::runtime_error(std::format(
+        "sequence length {} must be a multiple of {}", shape.seq_len, tile));
   }
 
   const std::size_t bytes = shape.rows() * shape.head_dim * sizeof(float);
@@ -103,18 +111,18 @@ void FlashAttention::run(const Matrix& q, const Matrix& k, const Matrix& v,
 
   auto* command = device_.queue()->commandBuffer();
   auto* encoder = command->computeCommandEncoder();
-  encoder->setComputePipelineState(pipeline());
+  encoder->setComputePipelineState(pipeline(head_dim));
   encoder->setBuffer(buffers_.q.get(), 0, 0);
   encoder->setBuffer(buffers_.k.get(), 0, 1);
   encoder->setBuffer(buffers_.v.get(), 0, 2);
   encoder->setBuffer(buffers_.o.get(), 0, 3);
   encoder->setBytes(&dims, sizeof(dims), 4);
-  encoder->setThreadgroupMemoryLength(threadgroup_memory_bytes(), 0);
+  encoder->setThreadgroupMemoryLength(threadgroup_memory_bytes(shape.head_dim),
+                                      0);
 
-  const std::size_t blocks = (shape.seq_len + kQueryRows - 1) / kQueryRows;
   encoder->dispatchThreadgroups(
-      MTL::Size::Make(blocks, shape.num_heads, shape.batch_size),
-      MTL::Size::Make(kThreads, 1, 1));
+      MTL::Size::Make(shape.seq_len / tile, shape.num_heads, shape.batch_size),
+      MTL::Size::Make(launch::num_threads(), 1, 1));
   encoder->endEncoding();
   command->commit();
   command->waitUntilCompleted();
