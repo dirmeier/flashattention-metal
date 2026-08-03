@@ -1,0 +1,18 @@
+// Generated from embedded_shaders.hpp.in. Do not edit.
+//
+// MLX takes the Metal code as a string and compiles it at runtime. A program
+// linking libfa.a has no path to the .metal files, so their text is stored in
+// the constants below.
+#pragma once
+
+namespace shaders {
+
+inline constexpr char kFlashAttentionHeader[] = R"SHADER(
+@FLASHATTENTION_METAL@
+)SHADER";
+
+inline constexpr char kFlashAttentionMLXBody[] = R"SHADER(
+@FLASHATTENTION_MLX_METAL@
+)SHADER";
+
+}  // namespace shaders

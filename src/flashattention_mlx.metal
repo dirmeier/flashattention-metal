@@ -1,0 +1,18 @@
+/// MLX custom kernel body
+
+threadgroup float shared[kShared];
+
+FlashAttentionDims dims;
+dims.batch = kBatch;
+dims.heads = kHeads;
+dims.seq = kSeq;
+dims.dim = kDim;
+dims.causal = kCausal ? 1u : 0u;
+dims.scale = 1.0f / sqrt(float(kDim));
+
+const uint3 block = threadgroup_position_in_grid;
+
+if constexpr (kVersion == 1) {
+  flash_attention_1_impl<kTile>(q, k, v, out, dims, shared, block,
+                                     thread_position_in_threadgroup.x, 32u);
+}
