@@ -13,19 +13,23 @@
 
 class FlashAttention {
  public:
+  enum class Version { v1 = 1, v2 };
+
   FlashAttention(const MetalDevice& device, std::string_view metallib_path);
   FlashAttention(const FlashAttention&) = delete;
   FlashAttention& operator=(const FlashAttention&) = delete;
 
   void run(const Matrix& q, const Matrix& k, const Matrix& v,
-           const AttentionShape& shape, Matrix& out);
+           const AttentionShape& shape, Version version, Matrix& out);
 
-  static std::size_t threadgroup_memory_bytes(std::size_t head_dim);
+  static std::size_t threadgroup_memory_bytes(Version version,
+                                              std::size_t head_dim);
 
  private:
-  static constexpr std::size_t kPipelines = std::size(launch::kHeadDims);
+  static constexpr std::size_t kPipelines =
+      std::size(launch::kVersions) * std::size(launch::kHeadDims);
 
-  MTL::ComputePipelineState* pipeline(int head_dim);
+  MTL::ComputePipelineState* pipeline(Version version, int head_dim);
 
   struct Buffers {
     NS::SharedPtr<MTL::Buffer> q;

@@ -32,8 +32,9 @@ mx::array custom_flash_attention(const mx::array& q, const mx::array& k,
         std::format("head dimension must be 64 or 128, got {}", dim));
   }
 
-  const int tile = launch::num_query_rows(dim);
-  const int threads = launch::num_threads();
+  const int kernel_version = std::to_underlying(version);
+  const int tile = launch::num_query_rows(kernel_version, dim);
+  const int threads = launch::num_threads(kernel_version);
 
   if (seq % tile != 0) {
     throw std::runtime_error(
@@ -55,8 +56,8 @@ mx::array custom_flash_attention(const mx::array& q, const mx::array& k,
       {"kHeads", heads},
       {"kCausal", causal},
       {"kTile", tile},
-      {"kShared",
-       launch::threadgroup_memory_bytes(dim) / static_cast<int>(sizeof(float))},
+      {"kShared", launch::threadgroup_memory_bytes(kernel_version, dim) /
+                      static_cast<int>(sizeof(float))},
       {"kKTile", launch::num_key_rows(dim)}};
 
   const auto grid = std::tuple{threads * (seq / tile), heads, batch};

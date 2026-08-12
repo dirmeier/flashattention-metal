@@ -1,6 +1,9 @@
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <utility>
 
 #include "attention_naive.hpp"
 #include "flashattention.hpp"
@@ -8,6 +11,10 @@
 #include "metal_device.hpp"
 
 namespace {
+
+using Version = FlashAttention::Version;
+
+constexpr Version kVersions[] = {Version::v1, Version::v2};
 
 /// GFLOP/s and GB/s
 std::tuple<double, double> throughput(const AttentionShape& shape,
@@ -63,8 +70,8 @@ void check_against_reference(const char* metallib_path) {
       {2, 1, 224, 128, true}};
 
   std::printf("bench scalar reference \n");
-  std::printf("%6s %6s %6s %6s %6s %12s\n", "batch", "heads", "seq", "dim",
-              "causal", "v1");
+  std::printf("%6s %6s %6s %6s %6s %12s %12s\n", "batch", "heads", "seq", "dim",
+              "causal", "v1", "v2");
 
   for (const AttentionShape& shape : kShapes) {
     const std::size_t rows = shape.rows();
@@ -81,13 +88,15 @@ void check_against_reference(const char* metallib_path) {
     Matrix expected(rows, shape.head_dim);
     attention_naive(q, k, v, shape, expected);
 
-    Matrix out(rows, shape.head_dim);
-    flash.run(q, k, v, shape, out);
-
-    std::printf("%6zu %6zu %6zu %6zu %6s %12.3e\n", shape.batch_size,
-                shape.num_heads, shape.seq_len, shape.head_dim,
-                shape.use_causal_mask ? "yes" : "no",
-                relative_frobenius(out, expected));
+    std::printf("%6zu %6zu %6zu %6zu %6s", shape.batch_size, shape.num_heads,
+                shape.seq_len, shape.head_dim,
+                shape.use_causal_mask ? "yes" : "no");
+    for (const Version version : kVersions) {
+      Matrix out(rows, shape.head_dim);
+      flash.run(q, k, v, shape, version, out);
+      std::printf(" %12.3e", relative_frobenius(out, expected));
+    }
+    std::printf("\n");
   }
   std::printf("\n");
 }
@@ -96,28 +105,31 @@ void bench_metal(const char* metallib_path) {
   MetalDevice device;
   FlashAttention flash(device, metallib_path);
 
-  std::printf("metal, v1 ==\n");
-  for (const std::size_t dim : {std::size_t{64}, std::size_t{128}}) {
-    std::printf("# dim=%zu: %zu bytes of threadgroup memory\n", dim,
-                FlashAttention::threadgroup_memory_bytes(dim));
-  }
-  print_header();
-
-  for (const std::size_t seq :
-       {std::size_t{512}, std::size_t{1024}, std::size_t{2048}}) {
+  for (const Version version : kVersions) {
+    std::printf("metal, v%d ==\n", std::to_underlying(version));
     for (const std::size_t dim : {std::size_t{64}, std::size_t{128}}) {
-      for (const bool causal : {false, true}) {
-        const AttentionShape shape{2, 4, seq, dim, causal};
-        const std::size_t rows = shape.rows();
+      std::printf("# dim=%zu: %zu bytes of threadgroup memory\n", dim,
+                  FlashAttention::threadgroup_memory_bytes(version, dim));
+    }
+    print_header();
 
-        const Matrix q = random_matrix(rows, dim, 1);
-        const Matrix k = random_matrix(rows, dim, 2);
-        const Matrix v = random_matrix(rows, dim, 3);
-        Matrix out(rows, dim);
+    for (const std::size_t seq :
+         {std::size_t{512}, std::size_t{1024}, std::size_t{2048}}) {
+      for (const std::size_t dim : {std::size_t{64}, std::size_t{128}}) {
+        for (const bool causal : {false, true}) {
+          const AttentionShape shape{2, 4, seq, dim, causal};
+          const std::size_t rows = shape.rows();
 
-        const double seconds =
-            time_call([&] { flash.run(q, k, v, shape, out); }, kWarmup, kIters);
-        print_row(shape, seconds);
+          const Matrix q = random_matrix(rows, dim, 1);
+          const Matrix k = random_matrix(rows, dim, 2);
+          const Matrix v = random_matrix(rows, dim, 3);
+          Matrix out(rows, dim);
+
+          const double seconds =
+              time_call([&] { flash.run(q, k, v, shape, version, out); },
+                        kWarmup, kIters);
+          print_row(shape, seconds);
+        }
       }
     }
   }

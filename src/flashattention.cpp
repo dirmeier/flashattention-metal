@@ -11,6 +11,7 @@
 
 namespace {
 
+using Version = FlashAttention::Version;
 struct FlashAttentionDims {
   uint32_t batch;
   uint32_t heads;
@@ -20,18 +21,22 @@ struct FlashAttentionDims {
   float scale;
 };
 
-std::string kernel_name(int head_dim) {
-  return std::format("flash_attention_1_d{}", head_dim);
+std::string kernel_name(Version version, int head_dim) {
+  return std::format("flash_attention_{}_d{}", std::to_underlying(version),
+                     head_dim);
 }
 
-constexpr std::size_t pipeline_slot(int head_dim) noexcept {
-  return head_dim == launch::kHeadDims[0] ? 0 : 1;
+constexpr std::size_t pipeline_slot(Version version, int head_dim) noexcept {
+  return (std::to_underlying(version) - 1) * std::size(launch::kHeadDims) +
+         (head_dim == launch::kHeadDims[0] ? 0 : 1);
 }
 
 }  // namespace
 
-std::size_t FlashAttention::threadgroup_memory_bytes(std::size_t head_dim) {
-  return launch::threadgroup_memory_bytes(static_cast<int>(head_dim));
+std::size_t FlashAttention::threadgroup_memory_bytes(Version version,
+                                                     std::size_t head_dim) {
+  return launch::threadgroup_memory_bytes(std::to_underlying(version),
+                                          static_cast<int>(head_dim));
 }
 
 FlashAttention::FlashAttention(const MetalDevice& device,
@@ -44,13 +49,14 @@ FlashAttention::FlashAttention(const MetalDevice& device,
   }
 }
 
-MTL::ComputePipelineState* FlashAttention::pipeline(int head_dim) {
-  auto& cached = pipelines_[pipeline_slot(head_dim)];
+MTL::ComputePipelineState* FlashAttention::pipeline(Version version,
+                                                    int head_dim) {
+  auto& cached = pipelines_[pipeline_slot(version, head_dim)];
   if (cached) {
     return cached.get();
   }
 
-  const std::string kernel = kernel_name(head_dim);
+  const std::string kernel = kernel_name(version, head_dim);
   auto* name = NS::String::string(kernel.c_str(), NS::UTF8StringEncoding);
   const auto function = NS::TransferPtr(library_->newFunction(name));
   if (!function) {
@@ -70,14 +76,16 @@ MTL::ComputePipelineState* FlashAttention::pipeline(int head_dim) {
 }
 
 void FlashAttention::run(const Matrix& q, const Matrix& k, const Matrix& v,
-                         const AttentionShape& shape, Matrix& out) {
+                         const AttentionShape& shape, Version version,
+                         Matrix& out) {
   if (shape.head_dim != 64 && shape.head_dim != 128) {
     throw std::runtime_error(std::format(
         "head dimension must be 64 or 128, got {}", shape.head_dim));
   }
 
   const int head_dim = static_cast<int>(shape.head_dim);
-  const auto tile = static_cast<std::size_t>(launch::num_query_rows(head_dim));
+  const auto tile = static_cast<std::size_t>(
+      launch::num_query_rows(std::to_underlying(version), head_dim));
   if (shape.seq_len % tile != 0) {
     throw std::runtime_error(std::format(
         "sequence length {} must be a multiple of {}", shape.seq_len, tile));
@@ -111,18 +119,18 @@ void FlashAttention::run(const Matrix& q, const Matrix& k, const Matrix& v,
 
   auto* command = device_.queue()->commandBuffer();
   auto* encoder = command->computeCommandEncoder();
-  encoder->setComputePipelineState(pipeline(head_dim));
+  encoder->setComputePipelineState(pipeline(version, head_dim));
   encoder->setBuffer(buffers_.q.get(), 0, 0);
   encoder->setBuffer(buffers_.k.get(), 0, 1);
   encoder->setBuffer(buffers_.v.get(), 0, 2);
   encoder->setBuffer(buffers_.o.get(), 0, 3);
   encoder->setBytes(&dims, sizeof(dims), 4);
-  encoder->setThreadgroupMemoryLength(threadgroup_memory_bytes(shape.head_dim),
-                                      0);
+  encoder->setThreadgroupMemoryLength(
+      threadgroup_memory_bytes(version, shape.head_dim), 0);
 
   encoder->dispatchThreadgroups(
       MTL::Size::Make(shape.seq_len / tile, shape.num_heads, shape.batch_size),
-      MTL::Size::Make(launch::num_threads(), 1, 1));
+      MTL::Size::Make(launch::num_threads(std::to_underlying(version)), 1, 1));
   encoder->endEncoding();
   command->commit();
   command->waitUntilCompleted();

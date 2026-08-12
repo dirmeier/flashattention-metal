@@ -4,7 +4,7 @@
 
 class MLXAttention {
  public:
-  enum class Version { v1 = 1 };
+  enum class Version { v1 = 1, v2 };
   static bool available();
 
   mlx::core::array operator()(const mlx::core::array& q,
