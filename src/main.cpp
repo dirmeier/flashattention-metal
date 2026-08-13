@@ -1,3 +1,5 @@
+#include <mlx/mlx.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -7,8 +9,11 @@
 
 #include "attention_naive.hpp"
 #include "flashattention.hpp"
+#include "flashattention_mlx.hpp"
 #include "matrix.hpp"
 #include "metal_device.hpp"
+
+namespace mx = mlx::core;
 
 namespace {
 
@@ -53,6 +58,25 @@ void print_row(const AttentionShape& shape, double seconds) {
 
 constexpr int kWarmup = 3;
 constexpr int kIters = 10;
+
+/// wraps host rows as [batch, heads, sequence, dim] without copying
+mx::array wrap(const Matrix& m, const AttentionShape& shape) {
+  const mx::Shape dims{
+      static_cast<int>(shape.batch_size), static_cast<int>(shape.num_heads),
+      static_cast<int>(shape.seq_len), static_cast<int>(shape.head_dim)};
+  return mx::array(const_cast<float*>(m.data.data()), dims, mx::float32,
+                   [](void*) {});
+}
+
+void run_mlx(MLXAttention& attention, const Matrix& q, const Matrix& k,
+             const Matrix& v, const AttentionShape& shape,
+             MLXAttention::Version version, Matrix& out) {
+  mx::array result = attention(wrap(q, shape), wrap(k, shape), wrap(v, shape),
+                               shape.use_causal_mask, version);
+  mx::eval(result);
+  std::memcpy(out.data.data(), result.data<float>(),
+              out.data.size() * sizeof(float));
+}
 
 }  // namespace
 
@@ -135,6 +159,36 @@ void bench_metal(const char* metallib_path) {
   }
 }
 
+void bench_mlx() {
+  MLXAttention attention;
+
+  std::printf("mlx attention\n");
+  print_header();
+
+  for (const std::size_t seq :
+       {std::size_t{512}, std::size_t{1024}, std::size_t{2048}}) {
+    for (const std::size_t dim : {std::size_t{64}, std::size_t{128}}) {
+      for (const bool causal : {false, true}) {
+        const AttentionShape shape{2, 4, seq, dim, causal};
+        const std::size_t rows = shape.rows();
+
+        const Matrix q = random_matrix(rows, dim, 1);
+        const Matrix k = random_matrix(rows, dim, 2);
+        const Matrix v = random_matrix(rows, dim, 3);
+        Matrix out(rows, dim);
+
+        const double seconds = time_call(
+            [&] {
+              run_mlx(attention, q, k, v, shape, MLXAttention::Version::v0,
+                      out);
+            },
+            kWarmup, kIters);
+        print_row(shape, seconds);
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr, "usage: %s <flashattention.metallib>\n", argv[0]);
@@ -142,6 +196,7 @@ int main(int argc, char** argv) {
   }
   check_against_reference(argv[1]);
   bench_metal(argv[1]);
+  bench_mlx();
 
   return 0;
 }

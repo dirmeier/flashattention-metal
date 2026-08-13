@@ -2,6 +2,7 @@
 
 #include <mlx/mlx.h>
 
+#include <cmath>
 #include <format>
 #include <stdexcept>
 #include <string>
@@ -18,7 +19,15 @@ namespace {
 using Version = MLXAttention::Version;
 using TemplateArgs = std::vector<std::pair<std::string, mx::fast::TemplateArg>>;
 
-/// our FlashAttention, compiled by MLX from the embedded shader source
+/// MLX's own FlashAttention (v0)
+mx::array mlx_flash_attention(const mx::array& q, const mx::array& k,
+                              const mx::array& v, bool causal) {
+  const float scale = 1.0f / std::sqrt(static_cast<float>(q.shape(3)));
+  return mx::fast::scaled_dot_product_attention(q, k, v, scale,
+                                                causal ? "causal" : "");
+}
+
+/// our FlashAttention (v1 and v2)
 mx::array custom_flash_attention(const mx::array& q, const mx::array& k,
                                  const mx::array& v, bool causal,
                                  Version version) {
@@ -77,5 +86,7 @@ mx::array MLXAttention::operator()(const mx::array& q, const mx::array& k,
   if (q.ndim() != 4) {
     throw std::runtime_error("expected rank 4 tensor");
   }
-  return custom_flash_attention(q, k, v, causal, version);
+  return version == Version::v0
+             ? mlx_flash_attention(q, k, v, causal)
+             : custom_flash_attention(q, k, v, causal, version);
 }
