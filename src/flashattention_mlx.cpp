@@ -27,7 +27,7 @@ mx::array mlx_flash_attention(const mx::array& q, const mx::array& k,
                                                 causal ? "causal" : "");
 }
 
-/// our FlashAttention (v1 and v2)
+/// our FlashAttention (v1 to v3)
 mx::array custom_flash_attention(const mx::array& q, const mx::array& k,
                                  const mx::array& v, bool causal,
                                  Version version) {

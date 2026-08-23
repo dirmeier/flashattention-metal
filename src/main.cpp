@@ -19,7 +19,7 @@ namespace {
 
 using Version = FlashAttention::Version;
 
-constexpr Version kVersions[] = {Version::v1, Version::v2};
+constexpr Version kVersions[] = {Version::v1, Version::v2, Version::v3};
 
 /// GFLOP/s and GB/s
 std::tuple<double, double> throughput(const AttentionShape& shape,
@@ -94,8 +94,8 @@ void check_against_reference(const char* metallib_path) {
       {2, 1, 224, 128, true}};
 
   std::printf("bench scalar reference \n");
-  std::printf("%6s %6s %6s %6s %6s %12s %12s\n", "batch", "heads", "seq", "dim",
-              "causal", "v1", "v2");
+  std::printf("%6s %6s %6s %6s %6s %12s %12s %12s\n", "batch", "heads", "seq",
+              "dim", "causal", "v1", "v2", "v3");
 
   for (const AttentionShape& shape : kShapes) {
     const std::size_t rows = shape.rows();

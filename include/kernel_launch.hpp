@@ -1,9 +1,12 @@
 #pragma once
 
-/// launch geometry for the FlashAttention kernels.
+#include <algorithm>
+
+/// launch geometry for the three FlashAttention kernels.
 namespace launch {
 
-inline constexpr int kVersions[] = {1, 2};
+inline constexpr int kPad = 4;
+inline constexpr int kVersions[] = {1, 2, 3};
 inline constexpr int kHeadDims[] = {64, 128};
 
 /// key rows per iteration of the inner loop
@@ -29,8 +32,16 @@ constexpr int threadgroup_memory_bytes(int version, int head_dim) {
       // each of queries/keys/outputs:  tile * head_dim;
       floats = tile * tile + 3 * tile * head_dim;
       break;
-    default:  // queries (32, fixed) and keys (accumulation in registers)
+    case 2:  // queries (32, fixed) and keys (accumulation in registers)
       floats = (32 + keys) * head_dim;
+      break;
+    default:  // queries, plus KV threadgroup memory sized for the larger of K,
+              // V
+      floats = 32 * (head_dim + kPad) +  // Q
+               std::max(                 // take whatever is larger of K and V
+                   head_dim * (keys + kPad),  // K
+                   keys * (head_dim + kPad)   // V
+               );
   }
   return floats * static_cast<int>(sizeof(float));
 }

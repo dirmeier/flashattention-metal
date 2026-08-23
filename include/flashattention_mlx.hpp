@@ -4,11 +4,11 @@
 
 class MLXAttention {
  public:
-  enum class Version { v0, v1, v2 };
+  enum class Version { v0, v1, v2, v3 };
   static bool available();
 
   mlx::core::array operator()(const mlx::core::array& q,
                               const mlx::core::array& k,
                               const mlx::core::array& v, bool causal,
-                              Version version = Version::v1);
+                              Version version = Version::v3);
 };

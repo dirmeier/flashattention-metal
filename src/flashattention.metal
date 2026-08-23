@@ -34,6 +34,7 @@ constant constexpr uint kQTileWide = 32;
 constant constexpr uint kSimdgroupsWide = kQTileWide / kFrag;
 constant constexpr uint kThreadsWide = kSimdgroupsWide * 32;
 
+constant constexpr uint kPad = 4;
 // One threadgroup handles one block of [T, D] query rows.
 //
 // Since each query row needs the entire [S, D]-dimensional keys and values,
@@ -449,6 +450,202 @@ kernel void flash_attention_2_d128(device const float* q [[buffer(0)]],
     flash_attention_2_impl<128, 16>(q, k, v, out, dims, shared, tgid, tid, sgid, lane);
 }
 
+
+// Builds on v2, but adds features from Apple's implementation of FlashAttention from MLX
+// https://github.com/ml-explore/mlx/blob/117188cd735299f396a08f7697a81759b1e0550b/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h#L70
+//
+// tl;dr: I just adapted what MLX is doing :] In short:
+//  SMEM now also holds V. at no extra cost, because K and V share one buffer.
+//  K is written, used for the score product, and then V is written over the top
+//  of it. So SMEM is Q plus whichever of K and V is larger:
+//      Q_smem:   32 × (D + 4)
+//      KV_smem:  max(D × (K_rows + 4), K_rows × (D + 4))
+//  K is written transposed to SMEM which explains the dimensionalty: K_rows × (D + 4)
+template <uint kDim, uint kKTile>
+void flash_attention_3_impl(device const float* q,
+                            device const float* k,
+                            device const float* v,
+                            device float* out,
+                            FlashAttentionDims dims,
+                            threadgroup float* shared,
+                            uint3 tgid,
+                            uint tid,
+                            uint sgid,
+                            uint lane) {
+    const uint q0 = tgid.x * kQTileWide;
+    if (q0 >= dims.seq) {
+        return;
+    }
+
+    const uint stride = dims.seq * dims.dim;
+    const uint slice = (tgid.z * dims.heads + tgid.y) * stride;
+    device const float* qb = q + slice;
+    device const float* kb = k + slice;
+    device const float* vb = v + slice;
+    device float* ob = out + slice;
+
+    constexpr uint kLDQ = kDim + kPad;    // query rows, padded
+    constexpr uint kLDK = kKTile + kPad;  // K^T rows are depth, cols are keys
+    constexpr uint kLDV = kDim + kPad;
+    threadgroup float* Q_smem = shared;                   // kQTileWide * kLDQ
+    threadgroup float* KV_smem = Q_smem + kQTileWide * kLDQ;  // K, then V over it
+
+    const uint qid = lane / 4u;
+    const uint sm = (qid & 4u) + ((lane / 2u) % 4u);
+    const uint sn = (qid & 2u) * 2u + (lane % 2u) * 2u;
+    const uint row_base = sgid * kFrag;
+    const uint my_row = q0 + row_base + sm;
+
+    for (uint r = 0; r < kQTileWide; ++r) {
+        for (uint c = tid; c < kDim; c += kThreadsWide) {
+            Q_smem[r * kLDQ + c] = qb[(q0 + r) * kDim + c];
+        }
+    }
+
+    simdgroup_float8x8 o_frag[kDim / kFrag];
+    for (uint c = 0; c < kDim / kFrag; ++c) {
+        o_frag[c] = simdgroup_float8x8(0.0f);
+    }
+
+    // Scores are carried in log2 space, as MLX does, so the softmax is exp2.
+    const float scale2 = dims.scale * M_LOG2E_F;
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+
+    const uint key_limit = (dims.causal != 0u) ? min(q0 + kQTileWide, dims.seq) : dims.seq;
+
+    for (uint k0 = 0; k0 < key_limit; k0 += kKTile) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // K transposed on the way in: KV_smem[depth][key].
+        for (uint r = 0; r < kKTile; ++r) {
+            for (uint c = tid; c < kDim; c += kThreadsWide) {
+                KV_smem[c * kLDK + r] = kb[(k0 + r) * kDim + c];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        simdgroup_float8x8 s_frag[kKTile / kFrag];
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < kKTile / kFrag; ++j) {
+            s_frag[j] = simdgroup_float8x8(0.0f);
+        }
+#pragma clang loop unroll(full)
+        for (uint d = 0; d < kDim / kFrag; ++d) {
+            simdgroup_float8x8 fq;
+            simdgroup_load(fq, Q_smem + row_base * kLDQ + d * kFrag, kLDQ);
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < kKTile / kFrag; ++j) {
+                simdgroup_float8x8 fk;
+                simdgroup_load(fk, KV_smem + d * kFrag * kLDK + j * kFrag, kLDK);
+                    simdgroup_multiply_accumulate(s_frag[j], fq, fk, s_frag[j]);
+            }
+        }
+
+        const bool edge = (k0 + kKTile > dims.seq) ||
+                          (dims.causal != 0u && k0 + kKTile > q0 + row_base + 1u);
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < kKTile / kFrag; ++j) {
+            thread auto& e = s_frag[j].thread_elements();
+            e[0] *= scale2;
+            e[1] *= scale2;
+            if (edge) {
+                for (uint i = 0; i < 2; ++i) {
+                    const uint key = k0 + j * kFrag + sn + i;
+                    if (key >= dims.seq || (dims.causal != 0u && key > my_row)) {
+                        e[i] = -INFINITY;
+                    }
+                }
+            }
+        }
+
+        // V goes into the same buffer K used
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint r = 0; r < kKTile; ++r) {
+            for (uint c = tid; c < kDim; c += kThreadsWide) {
+                KV_smem[r * kLDV + c] = vb[(k0 + r) * kDim + c];
+            }
+        }
+
+        float block_max = -INFINITY;
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < kKTile / kFrag; ++j) {
+            thread auto& e = s_frag[j].thread_elements();
+            block_max = max(block_max, max(e[0], e[1]));
+        }
+        block_max = max(block_max, simd_shuffle_xor(block_max, 1u));
+        block_max = max(block_max, simd_shuffle_xor(block_max, 8u));
+
+        const float new_max = max(running_max, block_max);
+        const float factor = isinf(running_max) ? 0.0f : exp2(running_max - new_max);
+
+        float block_sum = 0.0f;
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < kKTile / kFrag; ++j) {
+            thread auto& e = s_frag[j].thread_elements();
+            e[0] = isinf(e[0]) ? 0.0f : exp2(e[0] - new_max);
+            e[1] = isinf(e[1]) ? 0.0f : exp2(e[1] - new_max);
+            block_sum += e[0] + e[1];
+        }
+        block_sum += simd_shuffle_xor(block_sum, 1u);
+        block_sum += simd_shuffle_xor(block_sum, 8u);
+
+        running_sum = running_sum * factor + block_sum;
+        running_max = new_max;
+
+#pragma clang loop unroll(full)
+        for (uint c = 0; c < kDim / kFrag; ++c) {
+            thread auto& oe = o_frag[c].thread_elements();
+            oe[0] *= factor;
+            oe[1] *= factor;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(full)
+        for (uint c = 0; c < kDim / kFrag; ++c) {
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < kKTile / kFrag; ++j) {
+                    simdgroup_float8x8 fv;
+                simdgroup_load(fv, KV_smem + j * kFrag * kLDV + c * kFrag, kLDV);
+                    simdgroup_multiply_accumulate(o_frag[c], s_frag[j], fv, o_frag[c]);
+            }
+        }
+    }
+
+    const float inv = 1.0f / running_sum;
+#pragma clang loop unroll(full)
+    for (uint c = 0; c < kDim / kFrag; ++c) {
+        thread auto& oe = o_frag[c].thread_elements();
+        oe[0] *= inv;
+        oe[1] *= inv;
+        simdgroup_store(o_frag[c], ob + (q0 + row_base) * kDim + c * kFrag, kDim);
+    }
+}
+
+kernel void flash_attention_3_d64(device const float* q [[buffer(0)]],
+                                  device const float* k [[buffer(1)]],
+                                  device const float* v [[buffer(2)]],
+                                  device float* out [[buffer(3)]],
+                                  constant FlashAttentionDims& dims [[buffer(4)]],
+                                  threadgroup float* shared [[threadgroup(0)]],
+                                  uint3 tgid [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_index_in_threadgroup]],
+                                  uint sgid [[simdgroup_index_in_threadgroup]],
+                                  uint lane [[thread_index_in_simdgroup]]) {
+    flash_attention_3_impl<64, 32>(q, k, v, out, dims, shared, tgid, tid, sgid, lane);
+}
+
+kernel void flash_attention_3_d128(device const float* q [[buffer(0)]],
+                                   device const float* k [[buffer(1)]],
+                                   device const float* v [[buffer(2)]],
+                                   device float* out [[buffer(3)]],
+                                   constant FlashAttentionDims& dims [[buffer(4)]],
+                                   threadgroup float* shared [[threadgroup(0)]],
+                                   uint3 tgid [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_index_in_threadgroup]],
+                                   uint sgid [[simdgroup_index_in_threadgroup]],
+                                   uint lane [[thread_index_in_simdgroup]]) {
+    flash_attention_3_impl<128, 16>(q, k, v, out, dims, shared, tgid, tid, sgid, lane);
+}
 kernel void flash_attention_1_d64(device const float* q [[buffer(0)]],
                                  device const float* k [[buffer(1)]],
                                  device const float* v [[buffer(2)]],

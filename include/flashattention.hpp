@@ -13,7 +13,7 @@
 
 class FlashAttention {
  public:
-  enum class Version { v1 = 1, v2 };
+  enum class Version { v1 = 1, v2, v3 };
 
   FlashAttention(const MetalDevice& device, std::string_view metallib_path);
   FlashAttention(const FlashAttention&) = delete;

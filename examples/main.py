@@ -1,4 +1,4 @@
-"""Wraps and runs the v1 FlashAttention Metal kernel."""
+"""Wraps and runs the v3 FlashAttention Metal kernel."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import mlx.nn as nn
 SHADERS_PATH_ = Path(__file__).resolve().parent.parent / "src"
 
 KERNEL_ = mx.fast.metal_kernel(
-    name="flash_attention_mlx_v1",
+    name="flash_attention_mlx_v3",
     input_names=["q", "k", "v"],
     output_names=["out"],
     source=(SHADERS_PATH_ / "flashattention_mlx.metal").read_text(),
@@ -22,27 +22,26 @@ def _mlx_attention(
     q: mx.array, k: mx.array, v: mx.array, causal: bool = True
 ) -> mx.array:
     B, H, T, D = q.shape
-    tile = 32 if D <= 64 else 16
-    if T % tile != 0:
-        raise ValueError(f"sequence {T} must be a multiple of {tile}")
+    if T % 32 != 0:
+        raise ValueError(f"sequence {T} must be a multiple of 32")
 
     keys = 32 if D <= 64 else 16
-    shared = tile * tile + 3 * tile * D
+    shared = 32 * (D + 4) + max(D * (keys + 4), keys * (D + 4))
     return KERNEL_(
         inputs=[q, k, v],
         template=[
-            ("kVersion", 1),
+            ("kVersion", 3),
             ("kDim", D),
             ("kSeq", T),
             ("kBatch", B),
             ("kHeads", H),
             ("kCausal", causal),
-            ("kTile", tile),
+            ("kTile", 32),
             ("kShared", shared),
             ("kKTile", keys),
         ],
-        grid=(32 * (T // tile), H, B),
-        threadgroup=(32, 1, 1),
+        grid=(128 * (T // 32), H, B),
+        threadgroup=(128, 1, 1),
         output_shapes=[q.shape],
         output_dtypes=[q.dtype],
     )[0]
@@ -82,6 +81,7 @@ def main():
     out = TransformerBlock(dims=D, heads=D // 64)(x)
     mx.eval(out)
     print(out)
+
 
 
 if __name__ == "__main__":
