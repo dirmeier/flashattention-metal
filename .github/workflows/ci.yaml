@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  precommit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: no-commit-to-branch
+
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install meson ninja
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+      - run: meson setup build -Dmetal=disabled
+      - name: run clang-tidy
+        run: |
+          clang-tidy -p build \
+            --checks='bugprone-*,performance-*,-bugprone-easily-swappable-parameters' \
+            --warnings-as-errors='bugprone-*' \
+            src/matrix.cpp src/attention_naive.cpp
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install meson ninja
+      - run: |
+          brew update
+          brew install mlx
+      - run: xcodebuild -downloadComponent MetalToolchain || true
+      - run: xcrun --find metal && xcrun --find metallib
+      - name: configure
+        run: meson setup build -Dmetal=enabled -Dcmake_prefix_path=/opt/homebrew
+      - name: build
+        run: meson compile -C build
+      - name: check if the metallib kept its simdgroup matrix ops
+        run: |
+          xcrun metal-objdump --disassemble build/src/flashattention.metallib \
+            | grep -qi simdgroup_matrix
+      - name: benchmark
+        run: ./build/src/flash-attention build/src/flashattention.metallib
